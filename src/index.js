@@ -155,11 +155,40 @@ async function getToken(env) {
     client_secret: env.OPENSKY_CLIENT_SECRET,
   });
 
-  const res = await fetch(TOKEN_URL, {
-    method: 'POST',
-    headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
-    body,
-  });
+  // The OpenSky auth server can be slow or briefly drop connections (surfacing
+  // as a Cloudflare 522). Give it a generous timeout and retry once on a
+  // network-level failure or 5xx before giving up.
+  let res;
+  let lastErr;
+  for (let attempt = 0; attempt < 2; attempt++) {
+    try {
+      res = await fetch(TOKEN_URL, {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/x-www-form-urlencoded',
+          Accept: 'application/json',
+        },
+        body,
+        signal: AbortSignal.timeout(20_000),
+      });
+      // Retry transient upstream 5xx once; return anything else immediately.
+      if (res.status >= 500 && res.status < 600 && attempt === 0) {
+        lastErr = new Error(`token upstream ${res.status}`);
+        continue;
+      }
+      break;
+    } catch (e) {
+      lastErr = e;
+      // network error / timeout — retry once, then rethrow
+      if (attempt === 1) {
+        throw new Error(`Token request network failure: ${String(e && e.message || e)}`);
+      }
+    }
+  }
+
+  if (!res) {
+    throw new Error(`Token request failed: ${String(lastErr && lastErr.message || lastErr)}`);
+  }
 
   if (!res.ok) {
     const txt = await res.text().catch(() => '');
