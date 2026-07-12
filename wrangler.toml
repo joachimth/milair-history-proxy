@@ -2,17 +2,33 @@ name = "milair-history-proxy"
 main = "src/index.js"
 compatibility_date = "2026-07-01"
 
-# OpenSky's auth server (auth.opensky-network.org) sits behind Cloudflare.
-# Without this flag, a Worker's fetch() to another Cloudflare-fronted host can
-# be routed internally and fail instantly with a 522. This flag forces fetch()
-# to egress over the public internet, so the auth server is reached normally.
-compatibility_flags = ["global_fetch_strictly_public"]
+# ---------------------------------------------------------------------------
+# Cron trigger: poll adsb.lol every 2 minutes to accumulate our own history.
+# ---------------------------------------------------------------------------
+[triggers]
+crons = ["*/2 * * * *"]
 
-# Lock CORS to your app's origin in production. "*" is fine while testing.
-# Change this to e.g. "https://joachimth.github.io" once it works.
+# ---------------------------------------------------------------------------
+# D1 database binding. Create it once with:
+#   wrangler d1 create milair-history
+# then paste the printed database_id below (replace REPLACE_WITH_DATABASE_ID).
+# ---------------------------------------------------------------------------
+[[d1_databases]]
+binding = "DB"
+database_name = "milair-history"
+database_id = "REPLACE_WITH_DATABASE_ID"
+
+# ---------------------------------------------------------------------------
+# Config. Safe defaults; override in the Cloudflare dashboard or here.
+# ---------------------------------------------------------------------------
 [vars]
+# Lock CORS to your app origin in production, e.g. "https://joachimth.github.io".
 ALLOWED_ORIGIN = "*"
-
-# Secrets are NOT set here. Set them with:
-#   wrangler secret put OPENSKY_CLIENT_ID
-#   wrangler secret put OPENSKY_CLIENT_SECRET
+# Region to collect, as "west,south,east,north". Default = Northern Europe.
+REGION_BBOX = "-10.0,50.0,40.0,70.0"
+# How many days of history to keep.
+RETENTION_DAYS = "30"
+# Movement dedup: only store a new point if the aircraft moved >= this many
+# metres, OR at least DEDUP_MIN_SECONDS have passed since its last stored point.
+DEDUP_MIN_METERS = "200"
+DEDUP_MIN_SECONDS = "60"

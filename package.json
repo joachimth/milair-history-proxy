@@ -1,7 +1,7 @@
 {
   "name": "milair-history-proxy",
   "version": "1.0.0",
-  "description": "Cloudflare Worker proxy for OpenSky historical flight data (OAuth2 + CORS) for MilAir Watch",
+  "description": "Cloudflare Worker that builds its own historical flight database (D1 + Cron) for MilAir Watch",
   "private": true,
   "type": "module",
   "scripts": {

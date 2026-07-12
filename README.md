@@ -1,153 +1,134 @@
 # milair-history-proxy
 
-A tiny [Cloudflare Worker](https://workers.cloudflare.com/) that lets the
-browser-only **MilAir Watch** app read **historical** flight data from the
-[OpenSky Network](https://opensky-network.org/).
+A [Cloudflare Worker](https://workers.cloudflare.com/) that **builds and serves
+its own historical flight database** for the browser-only **MilAir Watch** app
+([adsb-planes-mil](https://github.com/joachimth/adsb-planes-mil)).
 
-It exists because OpenSky (a) requires OAuth2 with a secret that must not live
-in frontend code, and (b) sends no CORS headers, so a browser cannot call it
-directly. This Worker holds the secret, caches the token, and adds CORS.
+## Why this design
 
-> **Licence note:** OpenSky is free for research / non-commercial use. MilAir
-> Watch is open-source and non-commercial, which fits. Keep it that way.
+MilAir Watch shows live military / emergency / special aircraft over Northern
+Europe from [adsb.lol](https://adsb.lol/). adsb.lol serves **live** data freely,
+but has **no history endpoint** — you only ever get the current snapshot.
+
+The obvious answer (proxy OpenSky's history) turned out to be a dead end:
+
+- OpenSky's auth server **blocks datacenter IPs** — a Cloudflare Worker's
+  request to it just times out (surfaces as a `522`). A normal browser reaches
+  it fine, but a Worker cannot.
+- OpenSky's terms **forbid automated re-serving** of their data without a
+  written licence.
+
+So instead of re-serving someone else's history, this Worker **accumulates its
+own** from a source that *is* permitted for live access:
+
+1. A **Cron trigger** polls adsb.lol every 2 minutes for military / emergency /
+   special aircraft inside the region bounding box.
+2. Each position is stored in **Cloudflare D1** (SQLite), with **movement
+   dedup** so parked/stationary aircraft don't spam rows.
+3. Rows older than `RETENTION_DAYS` are pruned (once per hour, to spare the
+   free-tier write budget).
+4. The app reads a full multi-day track for any aircraft from **our** database.
+
+The history starts empty and grows: after ~24h you have a full day per aircraft,
+after `RETENTION_DAYS` you have the full window.
+
+> **Note:** The old OpenSky OAuth2 code was removed — it never worked from
+> Cloudflare (see above). Git history has it if you ever want a licensed path.
 
 ---
 
 ## Endpoints
 
-| Endpoint | What it returns |
+All `GET`, all JSON, all CORS-enabled.
+
+| Endpoint | Returns |
 |---|---|
-| `GET /tracks?icao24=4b1806&time=0` | One aircraft's flight path. `time=0` = most recent. History up to ~30 days back. |
-| `GET /flights?icao24=4b1806&begin=UNIX&end=UNIX` | All flights an aircraft flew in a time window (max 30-day span). |
-| `GET /health` | Liveness + whether credentials are configured. |
+| `GET /history?icao24=4b1806&hours=24` | One aircraft's stored track. `hours` default 24, max 720 (30d). `{ icao24, count, path:[{t,lat,lon,alt,track,gs,flight}] }` |
+| `GET /recent?minutes=15` | Distinct aircraft seen in the last `minutes` (which aircraft have history available). |
+| `GET /stats` | Row count, distinct aircraft, oldest/newest timestamp, retention config. |
+| `GET /health` | Liveness + whether the D1 binding is present. |
 
-`icao24` is the aircraft's ICAO 24-bit hex address — the same `hex` field
-MilAir Watch already uses (e.g. `4b1806`). Timestamps are **Unix seconds**.
-
-Responses are JSON with permissive CORS. On rate-limit the Worker returns
-`429` with a `Retry-After` header and `{ "retryAfterSeconds": N }`.
+Timestamps (`t`) are **Unix seconds** (UTC).
 
 ---
 
-## Setup — step by step
+## Setup
 
-You need two things: an **OpenSky API client** (for credentials) and a
-**Cloudflare account** (to host the Worker). ~15 minutes total.
-
-### 1. Create an OpenSky API client
-
-1. Go to <https://opensky-network.org/> and **register** a free account (or log
-   in). Confirm your email.
-2. Open your account page → **API Clients** (also reachable at
-   <https://opensky-network.org/my-opensky/account>).
-3. Create a new API client. OpenSky gives you a **client_id** and a
-   **client_secret**. Copy both now — the secret is shown only once.
-   - Since 2026-03-18 OpenSky uses OAuth2 *client credentials*; the old
-     username/password basic-auth no longer works. These two values are what
-     the Worker needs.
-
-### 2. Install the Cloudflare tooling
-
-You need Node.js installed, then Cloudflare's `wrangler` CLI:
+### 1. Create the D1 database
 
 ```bash
-npm install -g wrangler       # or: npm install (uses the devDependency here)
-wrangler login                # opens a browser to authorise your Cloudflare account
+wrangler d1 create milair-history
 ```
 
-If you don't have a Cloudflare account yet, `wrangler login` will walk you
-through creating one (it's free).
+This prints a `database_id`. Copy it into `wrangler.toml`, replacing
+`REPLACE_WITH_DATABASE_ID`:
 
-### 3. Add your OpenSky secrets to the Worker
-
-From this repo's folder:
-
-```bash
-wrangler secret put OPENSKY_CLIENT_ID
-# paste the client_id when prompted
-
-wrangler secret put OPENSKY_CLIENT_SECRET
-# paste the client_secret when prompted
+```toml
+[[d1_databases]]
+binding = "DB"
+database_name = "milair-history"
+database_id = "the-id-that-was-printed"
 ```
 
-These are stored encrypted by Cloudflare and never appear in the code or repo.
+(The table + indexes are created automatically on first request/poll — no
+migration step needed.)
 
-### 4. Deploy
+### 2. Deploy
 
 ```bash
 wrangler deploy
 ```
 
-Wrangler prints the live URL, e.g.
-`https://milair-history-proxy.<your-subdomain>.workers.dev`.
+That's it. The Cron trigger (`*/2 * * * *`) starts polling immediately. There
+are **no secrets** to set — adsb.lol needs no auth.
 
-Test it:
-
-```bash
-curl "https://milair-history-proxy.<your-subdomain>.workers.dev/health"
-# -> {"ok":true,...,"credentialsConfigured":true}
-
-curl "https://milair-history-proxy.<your-subdomain>.workers.dev/tracks?icao24=4b1806&time=0"
-```
-
-### 5. Lock down CORS (recommended)
-
-Once it works, edit `wrangler.toml` and set `ALLOWED_ORIGIN` to the app's
-origin instead of `*`:
-
-```toml
-[vars]
-ALLOWED_ORIGIN = "https://joachimth.github.io"
-```
-
-Then `wrangler deploy` again.
-
----
-
-## Local development
+### 3. Verify
 
 ```bash
-cp .dev.vars.example .dev.vars   # fill in your real client id/secret
-wrangler dev                     # serves on http://localhost:8787
-curl "http://localhost:8787/health"
+curl "https://<your-worker>.workers.dev/health"     # { ok:true, dbConfigured:true, ... }
+# wait a few minutes for the cron to run a few times, then:
+curl "https://<your-worker>.workers.dev/stats"      # rows should be climbing
+curl "https://<your-worker>.workers.dev/recent"     # aircraft currently being tracked
 ```
 
-`.dev.vars` is git-ignored — never commit it.
+Pick an `icao24` from `/recent`, then:
+
+```bash
+curl "https://<your-worker>.workers.dev/history?icao24=<hex>&hours=24"
+```
 
 ---
 
-## Using it from MilAir Watch
+## Configuration (`wrangler.toml` `[vars]`)
 
-Point the app at the Worker and fetch a track for the selected aircraft:
-
-```js
-const HISTORY_PROXY = 'https://milair-history-proxy.<your-subdomain>.workers.dev';
-
-async function fetchHistory(hex) {
-  const res = await fetch(`${HISTORY_PROXY}/tracks?icao24=${hex}&time=0`);
-  if (res.status === 429) {
-    const { retryAfterSeconds } = await res.json();
-    console.warn(`Rate limited, retry in ${retryAfterSeconds}s`);
-    return null;
-  }
-  if (!res.ok) return null;
-  return res.json(); // { icao24, callsign, startTime, endTime, path: [[time,lat,lon,baroAlt,track,onGround], ...] }
-}
-```
-
-The `path` array is a list of waypoints — feed the `[lat, lon]` pairs straight
-into the existing Leaflet route polyline to draw a real historical track,
-independent of what the client-side buffer happened to capture.
+| Var | Default | Meaning |
+|---|---|---|
+| `ALLOWED_ORIGIN` | `*` | CORS allow-origin. Lock to `https://joachimth.github.io` in prod. |
+| `REGION_BBOX` | `-10,50,40,70` | Area to collect, as `west,south,east,north`. Default = Northern Europe. |
+| `RETENTION_DAYS` | `30` | How long to keep positions. |
+| `DEDUP_MIN_METERS` | `200` | Store a new point only if the aircraft moved at least this far… |
+| `DEDUP_MIN_SECONDS` | `60` | …or at least this many seconds passed since its last stored point. |
 
 ---
 
-## Notes & limits
+## Free-tier budget
 
-- **`/tracks/all` is experimental** on OpenSky's side and can be temporarily
-  unavailable. The Worker handles empty/`null` responses gracefully.
-- **Credits / rate limits:** anonymous ~400 requests/day, authenticated
-  ~4000/day. When exhausted OpenSky returns `429`; the Worker forwards the
-  retry-after hint. Cache aggressively on the client if you add area-wide
-  queries later.
-- **Token caching** is in-memory per Worker isolate — no external storage
-  needed. Tokens refresh automatically ~2 min before expiry.
+Cloudflare D1 free tier: **5 GB storage**, **~5M rows read/day**,
+**~100k rows written/day** (INSERT/UPDATE/DELETE all count).
+
+- **Storage:** ~30 days of Northern-Europe special traffic ≈ a few hundred MB.
+  Comfortably within 5 GB.
+- **Writes:** poll every 2 min = 720 polls/day. With movement dedup, typically
+  well under the 100k/day write budget. If you ever approach it, raise
+  `DEDUP_MIN_METERS` / `DEDUP_MIN_SECONDS`, poll less often, or shrink
+  `REGION_BBOX`.
+- **Reads:** never a concern at app scale.
+
+Check real numbers any time with `GET /stats`.
+
+---
+
+## Licence
+
+MIT. adsb.lol data is used under its open terms; MilAir Watch is open-source and
+non-commercial.
