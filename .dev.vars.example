@@ -1,0 +1,4 @@
+# Copy to .dev.vars for local `wrangler dev`. NEVER commit the real file.
+# In production these are set with `wrangler secret put ...` instead.
+OPENSKY_CLIENT_ID=your-opensky-client-id
+OPENSKY_CLIENT_SECRET=your-opensky-client-secret

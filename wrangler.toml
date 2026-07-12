@@ -1,0 +1,12 @@
+name = "milair-history-proxy"
+main = "src/index.js"
+compatibility_date = "2026-07-01"
+
+# Lock CORS to your app's origin in production. "*" is fine while testing.
+# Change this to e.g. "https://joachimth.github.io" once it works.
+[vars]
+ALLOWED_ORIGIN = "*"
+
+# Secrets are NOT set here. Set them with:
+#   wrangler secret put OPENSKY_CLIENT_ID
+#   wrangler secret put OPENSKY_CLIENT_SECRET
