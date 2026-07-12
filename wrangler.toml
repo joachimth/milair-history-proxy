@@ -2,6 +2,12 @@ name = "milair-history-proxy"
 main = "src/index.js"
 compatibility_date = "2026-07-01"
 
+# OpenSky's auth server (auth.opensky-network.org) sits behind Cloudflare.
+# Without this flag, a Worker's fetch() to another Cloudflare-fronted host can
+# be routed internally and fail instantly with a 522. This flag forces fetch()
+# to egress over the public internet, so the auth server is reached normally.
+compatibility_flags = ["global_fetch_strictly_public"]
+
 # Lock CORS to your app's origin in production. "*" is fine while testing.
 # Change this to e.g. "https://joachimth.github.io" once it works.
 [vars]
