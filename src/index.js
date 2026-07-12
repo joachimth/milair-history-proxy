@@ -73,6 +73,11 @@ export default {
         );
       }
 
+      // Live area proxy — no DB needed. Server-side proxy of adsb.lol's area
+      // endpoint so the browser gets one reliable CORS-enabled hop instead of
+      // flaky public CORS proxies (which rate-limit and drop most calls).
+      if (path === '/live') return await handleLive(url, cors);
+
       if (!env.DB) {
         return json({ error: 'D1 database not bound. Add [[d1_databases]] in wrangler.toml.' }, 500, cors);
       }
@@ -195,6 +200,36 @@ async function fetchArea(bbox) {
   if (dist > 250) dist = 250;
   const target = `${ADSB_AREA_BASE}/lat/${lat.toFixed(4)}/lon/${lon.toFixed(4)}/dist/${dist}`;
   return await fetchJson(target);
+}
+
+/* ---------------- Live area proxy ---------------- */
+
+/**
+ * GET /live?lat=&lon=&dist=  — proxy adsb.lol's area endpoint server-side.
+ * Returns adsb.lol's raw response ({ ac: [...], now, ... }) with CORS headers.
+ * dist is clamped to adsb.lol's 250 NM max. Short edge-cached to spread load.
+ */
+async function handleLive(url, cors) {
+  const lat = Number(url.searchParams.get('lat'));
+  const lon = Number(url.searchParams.get('lon'));
+  let dist = Number(url.searchParams.get('dist') || 250);
+  if (!Number.isFinite(lat) || !Number.isFinite(lon)) {
+    return json({ error: 'lat and lon are required numbers' }, 400, cors);
+  }
+  if (!Number.isFinite(dist) || dist <= 0) dist = 250;
+  dist = Math.min(Math.round(dist), 250); // adsb.lol hard max
+
+  const target = `${ADSB_AREA_BASE}/lat/${lat}/lon/${lon}/dist/${dist}`;
+  const resp = await fetch(target, {
+    headers: { 'Accept': 'application/json', 'User-Agent': 'milair-history-proxy/1.0' },
+    // Edge-cache each unique area for 15s so repeated polls share a fetch.
+    cf: { cacheTtl: 15, cacheEverything: true },
+  });
+  if (!resp.ok) {
+    return json({ error: 'adsb.lol upstream error', status: resp.status }, 502, cors);
+  }
+  const data = await resp.json();
+  return json(data, 200, { ...cors, 'Cache-Control': 'public, max-age=10' });
 }
 
 /* ---------------- Read handlers ---------------- */
