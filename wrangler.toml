@@ -16,7 +16,7 @@ crons = ["*/2 * * * *"]
 [[d1_databases]]
 binding = "DB"
 database_name = "milair-history"
-database_id = "REPLACE_WITH_DATABASE_ID"
+database_id = "76702425-ec90-4495-b2aa-211c81da43e4"
 
 # ---------------------------------------------------------------------------
 # Config. Safe defaults; override in the Cloudflare dashboard or here.
