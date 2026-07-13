@@ -75,11 +75,27 @@ migration step needed.)
 
 ### 2. Deploy
 
+**Option A — Automated (recommended):** Push to GitHub.
+
+```bash
+git push origin main
+```
+
+The included GitHub Actions workflow (`.github/workflows/deploy.yml`) deploys
+automatically on every push to `main`. Set one secret in your repo
+settings → Secrets and variables → Actions:
+
+| Secret | Value |
+|---|---|
+| `CF_API_TOKEN` | Cloudflare API token with Workers + D1 edit permissions |
+
+**Option B — Manual (local CLI):**
+
 ```bash
 wrangler deploy
 ```
 
-That's it. The Cron trigger (`*/2 * * * *`) starts polling immediately. There
+The Cron trigger (`*/2 * * * *`) starts polling immediately. There
 are **no secrets** to set — adsb.lol needs no auth.
 
 ### 3. Verify
