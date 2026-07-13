@@ -23,7 +23,7 @@ database_id = "76702425-ec90-4495-b2aa-211c81da43e4"
 # ---------------------------------------------------------------------------
 [vars]
 # Lock CORS to your app origin in production, e.g. "https://joachimth.github.io".
-ALLOWED_ORIGIN = "*"
+ALLOWED_ORIGIN = "https://joachimth.github.io"
 # Region to collect, as "west,south,east,north". Default = Northern Europe.
 REGION_BBOX = "-10.0,50.0,40.0,70.0"
 # How many days of history to keep.
