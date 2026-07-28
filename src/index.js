@@ -88,7 +88,7 @@ export default {
       if (path === '/stats') return await handleStats(env, cors);
       if (path === '/daily-stats') return await handleDailyStats(env, cors);
       if (path === '/type-stats') return await handleTypeStats(env, cors);
-      if (path === '/top-aircraft') return await handleTopAircraft(env, cors);
+      if (path === '/top-aircraft') return await handleTopAircraft(url, env, cors);
       if (path === '/dashboard' || path === '') return await handleDashboard(env, cors);
 
       return json({ error: 'Not found', path }, 404, cors);
