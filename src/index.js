@@ -486,10 +486,13 @@ async function handleTopAircraft(url, env, cors) {
   if (!Number.isFinite(limit) || limit < 1) limit = 20;
   if (limit > 100) limit = 100;
 
+  // Use a simpler query: count per icao24, no DISTINCT on days_seen to avoid
+  // expensive GROUP BY on a 5000+ row table with D1's tight timeout.
+  // We add a covering index on (icao24,t) which the count query can use.
+  // Also grab a representative callsign + kind via MAX (text aggregation).
   const res = await env.DB.prepare(
     `SELECT icao24,
             COUNT(*) AS points,
-            COUNT(DISTINCT CAST(t / 86400 AS INTEGER)) AS days_seen,
             MAX(t) AS last_seen,
             MAX(flight) AS flight,
             MAX(kind) AS kind
