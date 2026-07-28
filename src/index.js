@@ -86,6 +86,10 @@ export default {
       if (path === '/history') return await handleHistory(url, env, cors);
       if (path === '/recent') return await handleRecent(url, env, cors);
       if (path === '/stats') return await handleStats(env, cors);
+      if (path === '/daily-stats') return await handleDailyStats(env, cors);
+      if (path === '/type-stats') return await handleTypeStats(env, cors);
+      if (path === '/top-aircraft') return await handleTopAircraft(env, cors);
+      if (path === '/dashboard' || path === '') return await handleDashboard(env, cors);
 
       return json({ error: 'Not found', path }, 404, cors);
     } catch (err) {
@@ -374,6 +378,336 @@ function kindOf(ac) {
 function tag(ac, kind) {
   ac._kind = kind;
   return ac;
+}
+
+/* ---------------- Stats dashboard handlers ---------------- */
+
+/**
+ * GET /daily-stats — rows per day for the last 14 days.
+ * Returns an array of { date, rows, aircraft } objects.
+ */
+async function handleDailyStats(env, cors) {
+  const now = Math.floor(Date.now() / 1000);
+  const fourteenDays = 14 * 86400;
+  const since = now - fourteenDays;
+
+  const res = await env.DB.prepare(
+    `SELECT
+        CAST(t / 86400 AS INTEGER) AS day_bucket,
+        COUNT(*) AS rows,
+        COUNT(DISTINCT icao24) AS aircraft
+     FROM positions
+     WHERE t >= ?
+     GROUP BY day_bucket
+     ORDER BY day_bucket ASC`
+  ).bind(since).all();
+
+  const baseDate = new Date(since * 1000);
+  const startDay = Math.floor(since / 86400);
+
+  // Build a complete 14-day series, filling gaps with zeros
+  const dailyMap = new Map();
+  for (const r of res.results || []) {
+    dailyMap.set(r.day_bucket, { rows: r.rows, aircraft: r.aircraft });
+  }
+
+  const days = [];
+  for (let i = 0; i < 14; i++) {
+    const bucket = startDay + i;
+    const d = new Date(bucket * 86400 * 1000);
+    const dateStr = d.toISOString().slice(0, 10);
+    const data = dailyMap.get(bucket);
+    days.push({
+      date: dateStr,
+      rows: data?.rows ?? 0,
+      aircraft: data?.aircraft ?? 0,
+    });
+  }
+
+  return json({ days }, 200, cors);
+}
+
+/**
+ * GET /type-stats — breakdown by `kind` (mil, emergency, special).
+ * Returns today's stats and all-time totals.
+ */
+async function handleTypeStats(env, cors) {
+  const now = Math.floor(Date.now() / 1000);
+  const todayStart = now - (now % 86400);
+
+  // All-time totals
+  const allTime = await env.DB.prepare(
+    `SELECT kind, COUNT(*) AS rows, COUNT(DISTINCT icao24) AS aircraft
+     FROM positions
+     WHERE kind IS NOT NULL
+     GROUP BY kind
+     ORDER BY rows DESC`
+  ).all();
+
+  // Today
+  const today = await env.DB.prepare(
+    `SELECT kind, COUNT(*) AS rows, COUNT(DISTINCT icao24) AS aircraft
+     FROM positions
+     WHERE kind IS NOT NULL AND t >= ?
+     GROUP BY kind
+     ORDER BY rows DESC`
+  ).bind(todayStart).all();
+
+  // Unknown breakdown (kind IS NULL)
+  const unknownAll = await env.DB.prepare(
+    `SELECT COUNT(*) AS rows, COUNT(DISTINCT icao24) AS aircraft
+     FROM positions
+     WHERE kind IS NULL`
+  ).first();
+
+  const unknownToday = await env.DB.prepare(
+    `SELECT COUNT(*) AS rows, COUNT(DISTINCT icao24) AS aircraft
+     FROM positions
+     WHERE kind IS NULL AND t >= ?`
+  ).bind(todayStart).first();
+
+  return json({
+    allTime: {
+      kinds: allTime.results || [],
+      unknown: { rows: unknownAll?.rows ?? 0, aircraft: unknownAll?.aircraft ?? 0 },
+    },
+    today: {
+      kinds: today.results || [],
+      unknown: { rows: unknownToday?.rows ?? 0, aircraft: unknownToday?.aircraft ?? 0 },
+    },
+  }, 200, cors);
+}
+
+/**
+ * GET /top-aircraft[?limit=20] — most frequently seen aircraft by position count.
+ */
+async function handleTopAircraft(url, env, cors) {
+  let limit = Number(url.searchParams.get('limit') || 20);
+  if (!Number.isFinite(limit) || limit < 1) limit = 20;
+  if (limit > 100) limit = 100;
+
+  const res = await env.DB.prepare(
+    `SELECT icao24,
+            COUNT(*) AS points,
+            COUNT(DISTINCT CAST(t / 86400 AS INTEGER)) AS days_seen,
+            MAX(t) AS last_seen,
+            MAX(flight) AS flight,
+            MAX(kind) AS kind
+     FROM positions
+     GROUP BY icao24
+     ORDER BY points DESC
+     LIMIT ?`
+  ).bind(limit).all();
+
+  return json({ limit, aircraft: res.results || [] }, 200, cors);
+}
+
+/**
+ * GET /dashboard — a self-contained HTML dashboard page.
+ * Renders stats visually using inline SVG and client-side data fetching.
+ */
+async function handleDashboard(env, cors) {
+  const html = `<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>MilAir History — Dashboard</title>
+<style>
+  *, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
+  body {
+    font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif;
+    background: #0b0f1a; color: #d4d8e0; padding: 20px; max-width: 1000px; margin: 0 auto;
+  }
+  h1 { font-size: 1.5rem; color: #8ba4d4; margin-bottom: 4px; }
+  .subtitle { color: #6b7a94; font-size: 0.85rem; margin-bottom: 24px; }
+  .grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(180px, 1fr)); gap: 12px; margin-bottom: 24px; }
+  .card {
+    background: #141a2e; border: 1px solid #1e2745; border-radius: 10px; padding: 16px;
+  }
+  .card h3 { font-size: 0.7rem; text-transform: uppercase; letter-spacing: 0.06em; color: #6b7a94; margin-bottom: 4px; }
+  .card .value { font-size: 1.6rem; font-weight: 600; color: #b4c8f0; }
+  .card .unit { font-size: 0.8rem; color: #5a6a84; }
+  .card-row { display: flex; gap: 8px; flex-wrap: wrap; }
+  .card-row .card { flex: 1; min-width: 120px; }
+  h2 { font-size: 1rem; color: #8ba4d4; margin: 20px 0 12px; }
+  table { width: 100%; border-collapse: collapse; font-size: 0.8rem; }
+  th { text-align: left; color: #6b7a94; padding: 8px 8px 4px 0; border-bottom: 1px solid #1e2745; font-weight: 500; }
+  td { padding: 6px 8px 6px 0; border-bottom: 1px solid #141a2e; }
+  .bar-chart { display: flex; align-items: end; gap: 2px; height: 80px; padding-top: 4px; }
+  .bar { flex: 1; background: #2a3a6a; border-radius: 2px 2px 0 0; position: relative; min-width: 4px; transition: background 0.2s; }
+  .bar:hover { background: #4a6aaa; }
+  .bar .tooltip { display: none; position: absolute; bottom: 100%; left: 50%; transform: translateX(-50%);
+    background: #1e2745; border: 1px solid #2a3a6a; padding: 4px 8px; border-radius: 4px;
+    font-size: 0.7rem; white-space: nowrap; z-index: 10; pointer-events: none; }
+  .bar:hover .tooltip { display: block; }
+  .bar-label { font-size: 0.55rem; color: #5a6a84; text-align: center; margin-top: 2px; overflow: hidden; text-overflow: ellipsis; }
+  .tag { display: inline-block; padding: 1px 6px; border-radius: 3px; font-size: 0.7rem; font-weight: 500; }
+  .tag-mil { background: #2a3a6a; color: #8cb4ff; }
+  .tag-emergency { background: #6a2a2a; color: #ff8c8c; }
+  .tag-special { background: #2a5a3a; color: #8cffb4; }
+  .loading { color: #5a6a84; font-style: italic; font-size: 0.85rem; padding: 20px 0; }
+  .error { color: #ff6b6b; font-size: 0.85rem; padding: 12px 0; }
+  .last-updated { font-size: 0.7rem; color: #4a5a74; text-align: right; margin-top: 32px; }
+  footer { font-size: 0.7rem; color: #3a4a64; text-align: center; margin-top: 40px; padding-top: 16px; border-top: 1px solid #141a2e; }
+</style>
+</head>
+<body>
+
+<h1>🛩️ MilAir History Dashboard</h1>
+<div class="subtitle" id="subtitle">Loading...</div>
+
+<div class="grid" id="stats-cards">
+  <div class="card"><h3>Total positions</h3><div class="value" id="total-rows">—</div></div>
+  <div class="card"><h3>Unique aircraft</h3><div class="value" id="total-ac">—</div></div>
+  <div class="card"><h3>Retention</h3><div class="value" id="retention">—</div><div class="unit">days</div></div>
+  <div class="card"><h3>Data coverage</h3><div class="value" id="coverage">—</div><div class="unit">days</div></div>
+</div>
+
+<h2>📊 Daily position count (last 14 days)</h2>
+<div id="daily-chart" class="loading">Loading chart...</div>
+
+<h2>🏷️ Aircraft type breakdown</h2>
+<div class="card-row" id="type-cards"></div>
+
+<h2>✨ Most seen aircraft <span style="font-size:0.7rem;color:#5a6a84;font-weight:400;">(all time)</span></h2>
+<div id="top-table" class="loading">Loading...</div>
+
+<p class="last-updated" id="last-updated"></p>
+
+<footer>milair-history-proxy &middot; Data collected every 2 minutes from adsb.lol</footer>
+
+<script>
+const API = '';
+
+async function loadAll() {
+  try {
+    const [stats, daily, typeStats, top] = await Promise.all([
+      fetch(API + '/stats').then(r => r.json()),
+      fetch(API + '/daily-stats').then(r => r.json()),
+      fetch(API + '/type-stats').then(r => r.json()),
+      fetch(API + '/top-aircraft?limit=50').then(r => r.json()),
+    ]);
+    renderStats(stats);
+    renderDaily(daily);
+    renderTypes(typeStats);
+    renderTop(top);
+    document.getElementById('last-updated').textContent = 'Last updated: ' + new Date().toLocaleString();
+    document.getElementById('subtitle').textContent = 'Live from D1 database';
+  } catch (e) {
+    document.getElementById('subtitle').textContent = 'Error loading data';
+    document.querySelectorAll('.loading').forEach(el => el.textContent = 'Failed to load. ' + e.message);
+  }
+}
+
+function renderStats(s) {
+  document.getElementById('total-rows').textContent = s.rows?.toLocaleString() ?? '—';
+  document.getElementById('total-ac').textContent = s.aircraft?.toLocaleString() ?? '—';
+  document.getElementById('retention').textContent = s.retentionDays ?? '—';
+
+  if (s.oldest && s.newest) {
+    const days = Math.round((s.newest - s.oldest) / 86400);
+    document.getElementById('coverage').textContent = days;
+  }
+}
+
+function renderDaily(d) {
+  if (!d.days || d.days.length === 0) {
+    document.getElementById('daily-chart').textContent = 'No daily data yet.';
+    return;
+  }
+  let maxRows = 0;
+  for (const day of d.days) if (day.rows > maxRows) maxRows = day.rows;
+  if (maxRows === 0) maxRows = 1;
+
+  let html = '<div class="bar-chart">';
+  for (const day of d.days) {
+    const pct = (day.rows / maxRows) * 100;
+    const label = day.date.slice(5); // MM-DD
+    html += '<div style="flex:1;display:flex;flex-direction:column;align-items:center;">';
+    html += '<div class="bar" style="height:' + Math.max(pct, 2) + '%">';
+    html += '<div class="tooltip">' + day.date + ': ' + day.rows + ' positions, ' + day.aircraft + ' aircraft</div>';
+    html += '</div>';
+    html += '<div class="bar-label">' + label + '</div>';
+    html += '</div>';
+  }
+  html += '</div>';
+  html += '<div style="font-size:0.7rem;color:#5a6a84;margin-top:4px;">Peak: ' + maxRows.toLocaleString() + ' positions in one day</div>';
+  document.getElementById('daily-chart').innerHTML = html;
+}
+
+function renderTypes(ts) {
+  const kinds = ts.allTime?.kinds ?? [];
+  const unknown = ts.allTime?.unknown ?? { rows: 0 };
+  const todayKinds = ts.today?.kinds ?? [];
+  const todayUnknown = ts.today?.unknown ?? { rows: 0 };
+
+  if (kinds.length === 0 && unknown.rows === 0) {
+    document.getElementById('type-cards').innerHTML = '<div class="card">No type data</div>';
+    return;
+  }
+
+  let html = '';
+  const allEntries = [...kinds];
+  if (unknown.rows > 0) allEntries.push({ kind: null, rows: unknown.rows, aircraft: unknown.aircraft });
+
+  for (const entry of allEntries) {
+    const kind = entry.kind || 'unknown';
+    const tagClass = entry.kind === 'mil' ? 'tag-mil' : entry.kind === 'emergency' ? 'tag-emergency' : entry.kind === 'special' ? 'tag-special' : '';
+    const todayEntry = todayKinds.find(k => k.kind === entry.kind);
+    const todayRows = todayEntry?.rows ?? (entry.kind === null ? todayUnknown.rows : 0);
+
+    html += '<div class="card">';
+    html += '<h3><span class="tag ' + tagClass + '">' + kind + '</span></h3>';
+    html += '<div class="value">' + (entry.rows ?? 0).toLocaleString() + '</div>';
+    html += '<div class="unit">positions &middot; ' + (entry.aircraft ?? 0) + ' aircraft</div>';
+    html += '<div class="unit" style="margin-top:2px;">Today: ' + todayRows + ' positions</div>';
+    html += '</div>';
+  }
+  document.getElementById('type-cards').innerHTML = html;
+}
+
+function renderTop(top) {
+  if (!top.aircraft || top.aircraft.length === 0) {
+    document.getElementById('top-table').textContent = 'No data yet.';
+    return;
+  }
+
+  let html = '<table><thead><tr><th>#</th><th>Callsign</th><th>ICAO24</th><th>Points</th><th>Days</th><th>Kind</th></tr></thead><tbody>';
+  for (let i = 0; i < top.aircraft.length; i++) {
+    const ac = top.aircraft[i];
+    const callsign = ac.flight || '—';
+    const lastSeen = ac.last_seen ? new Date(ac.last_seen * 1000).toLocaleString() : '—';
+    const kindTag = ac.kind ? '<span class="tag tag-' + ac.kind + '">' + ac.kind + '</span>' : '<span style="color:#5a6a84;">—</span>';
+    html += '<tr>';
+    html += '<td style="color:#5a6a84;">' + (i + 1) + '</td>';
+    html += '<td><strong>' + callsign + '</strong></td>';
+    html += '<td style="font-family:monospace;color:#6b7a94;">' + ac.icao24 + '</td>';
+    html += '<td>' + ac.points.toLocaleString() + '</td>';
+    html += '<td>' + (ac.days_seen ?? '—') + '</td>';
+    html += '<td>' + kindTag + '</td>';
+    html += '</tr>';
+  }
+  html += '</tbody></table>';
+  document.getElementById('top-table').innerHTML = html;
+}
+
+loadAll();
+// Auto-refresh every 60 seconds
+setInterval(loadAll, 60000);
+</script>
+
+</body>
+</html>`;
+
+  return new Response(html, {
+    status: 200,
+    headers: {
+      'Content-Type': 'text/html; charset=utf-8',
+      ...cors,
+      'Cache-Control': 'no-cache, no-store, must-revalidate',
+    },
+  });
 }
 
 /* ---------------- generic helpers ---------------- */
