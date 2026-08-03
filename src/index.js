@@ -89,6 +89,7 @@ export default {
       if (path === '/daily-stats') return await handleDailyStats(env, cors);
       if (path === '/type-stats') return await handleTypeStats(env, cors);
       if (path === '/top-aircraft') return await handleTopAircraft(url, env, cors);
+      if (path === '/heatmap') return await handleHeatmap(url, env, cors);
       if (path === '/dashboard' || path === '') return await handleDashboard(env, cors);
 
       return json({ error: 'Not found', path }, 404, cors);
@@ -244,7 +245,7 @@ async function handleHistory(url, env, cors) {
 
   let hours = Number(url.searchParams.get('hours') || 24);
   if (!Number.isFinite(hours) || hours <= 0) hours = 24;
-  if (hours > 720) hours = 720; // cap at 30 days
+  if (hours > 2160) hours = 2160; // cap at 90 days
 
   const since = Math.floor(Date.now() / 1000) - Math.round(hours * 3600);
   const res = await env.DB.prepare(
@@ -503,6 +504,46 @@ async function handleTopAircraft(url, env, cors) {
   ).bind(limit).all();
 
   return json({ limit, aircraft: res.results || [] }, 200, cors);
+}
+
+/**
+ * GET /heatmap?hours=2160&grid=0.5
+ * Returns gridded position counts for heatmap visualization.
+ * Groups positions into lat/lon grid cells and returns center + count per cell.
+ * This keeps the response small even with 90 days of data.
+ */
+async function handleHeatmap(url, env, cors) {
+  let hours = Number(url.searchParams.get('hours') || 2160);
+  if (!Number.isFinite(hours) || hours <= 0) hours = 2160;
+  if (hours > 2160) hours = 2160;
+
+  let grid = Number(url.searchParams.get('grid') || 0.5);
+  if (!Number.isFinite(grid) || grid <= 0) grid = 0.5;
+  if (grid < 0.1) grid = 0.1;
+  if (grid > 5) grid = 5;
+
+  const since = Math.floor(Date.now() / 1000) - Math.round(hours * 3600);
+
+  // Bucket positions into grid cells using SQLite's rounding trick.
+  // ROUND(lat / grid) * grid gives the cell center.
+  const res = await env.DB.prepare(
+    `SELECT ROUND(lat / ?) * ? AS glat,
+            ROUND(lon / ?) * ? AS glon,
+            COUNT(*) AS cnt
+       FROM positions
+      WHERE t >= ?
+      GROUP BY glat, glon
+      ORDER BY cnt DESC
+      LIMIT 2000`
+  ).bind(grid, grid, grid, grid, since).all();
+
+  const points = (res.results || []).map((r) => ({
+    lat: r.glat,
+    lon: r.glon,
+    count: r.cnt,
+  }));
+
+  return json({ hours, grid, count: points.length, points }, 200, cors);
 }
 
 /**
