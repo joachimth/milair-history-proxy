@@ -27,7 +27,7 @@ ALLOWED_ORIGIN = "https://joachimth.github.io"
 # Region to collect, as "west,south,east,north". Default = Northern Europe.
 REGION_BBOX = "-10.0,50.0,40.0,70.0"
 # How many days of history to keep.
-RETENTION_DAYS = "30"
+RETENTION_DAYS = "90"
 # Movement dedup: only store a new point if the aircraft moved >= this many
 # metres, OR at least DEDUP_MIN_SECONDS have passed since its last stored point.
 DEDUP_MIN_METERS = "200"
